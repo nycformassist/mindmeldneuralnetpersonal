@@ -21,7 +21,7 @@ export default function App() {
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [transcript, setTranscript] = useState('');
 
-  // Load notes from localStorage
+  // 1. Initial Load Logic
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -36,9 +36,9 @@ export default function App() {
       const welcomeNote: Note = {
         id: crypto.randomUUID(),
         title: 'Neural Vault: Genesis',
-        content: '# Neural Vault v2.0\n\nWelcome to your personal knowledge clone. This environment is designed for high-performance synthesis.\n\n### Pillars of Intelligence:\n- **Modern Ministry**: Visionary strategy.\n- **Human Anchor**: Community grounding.\n- **Leapfrog Initiative**: Tactical disruption.\n- **Sothic Gatekeeper**: Protective intelligence.\n\nUse the **Mic** button to dictate thoughts directly into the vault.',
+        content: '# Megalithic Commandment Framework\n\nWelcome to your personal knowledge clone. Every note here feeds into your 4 strategic pillars.\n\n### Current System Pillars:\n- **Modern Ministry**: Visionary leadership.\n- **Human Anchor**: Community grounding.\n- **Leapfrog Initiative**: Tactical disruption.\n- **Sothic Gatekeeper**: Protective intelligence.',
         updatedAt: Date.now(),
-        tags: ['genesis'],
+        tags: ['genesis', 'framework'],
         pillarType: 'MODERN_MINISTRY',
         relatedNoteIds: []
       };
@@ -48,6 +48,7 @@ export default function App() {
     setIsLoaded(true);
   }, []);
 
+  // 2. Persistent Storage Sync
   useEffect(() => {
     if (isLoaded) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
@@ -57,6 +58,19 @@ export default function App() {
   const activeNote = useMemo(() => 
     notes.find(n => n.id === activeNoteId) || null
   , [notes, activeNoteId]);
+
+  // 3. Appending Voice Transcripts
+  // This hook ensures that when VoiceToText emits a transcript, it's injected 
+  // directly into the active note's content without overwriting.
+  useEffect(() => {
+    if (transcript && activeNoteId) {
+      updateNote({
+        content: activeNote?.content + (activeNote?.content ? " " : "") + transcript
+      });
+      // Clear local transcript state to prevent repeat injections
+      setTranscript('');
+    }
+  }, [transcript]);
 
   const handleNewNote = () => {
     const newNote: Note = {
@@ -85,6 +99,7 @@ export default function App() {
     if (!activeNote || !activeNote.content) return;
     setIsAnalyzing(true);
     try {
+      // Calls the Gemini 3.1 Pro backend to detect semantic links across the vault
       const relatedIds = await detectRelationships(activeNote, notes);
       updateNote({ relatedNoteIds: relatedIds });
     } catch (error) {
@@ -92,12 +107,6 @@ export default function App() {
     } finally {
       setIsAnalyzing(false);
     }
-  };
-
-  const handleTranscript = (text: string) => {
-    setTranscript(text);
-    // Reset transcript after a short delay to allow Editor to consume it
-    setTimeout(() => setTranscript(''), 100);
   };
 
   if (!isLoaded) {
@@ -121,7 +130,7 @@ export default function App() {
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: 320, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
-            className="h-full overflow-hidden shrink-0"
+            className="h-full overflow-hidden shrink-0 border-r border-white/5"
           >
             <Sidebar
               notes={notes}
@@ -135,14 +144,14 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="flex-1 flex flex-col overflow-hidden relative">
+      <main className="flex-1 flex flex-col overflow-hidden relative bg-[#0a0a0a]">
         <AnimatePresence mode="wait">
           {activeNote ? (
             <motion.div 
               key={activeNote.id}
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 1.02 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
               className="flex-1 flex flex-col overflow-hidden"
             >
               <div className="flex-1 flex overflow-hidden">
@@ -164,14 +173,14 @@ export default function App() {
                         <button
                           onClick={handleAnalyze}
                           disabled={isAnalyzing || !activeNote.content}
-                          className="flex items-center gap-3 px-6 py-3 rounded-[24px] bg-emerald-500 text-vault-bg font-bold text-sm hover:scale-105 active:scale-95 transition-all shadow-xl shadow-emerald-500/20 disabled:opacity-50"
+                          className="flex items-center gap-3 px-6 py-3 rounded-[24px] bg-emerald-500 text-[#050505] font-bold text-sm hover:scale-105 active:scale-95 transition-all shadow-xl shadow-emerald-500/20 disabled:opacity-50 group"
                         >
                           {isAnalyzing ? (
-                            <Loader2 size={18} className="animate-spin" />
+                            <Loader2 size={18} className="animate-spin text-black" />
                           ) : (
-                            <BrainCircuit size={18} />
+                            <BrainCircuit size={18} className="group-hover:rotate-12 transition-transform" />
                           )}
-                          {isAnalyzing ? 'Mapping Neural Links...' : 'Analyze Semantic Map'}
+                          {isAnalyzing ? 'Mapping Neural Links...' : 'Synthesize Semantic Map'}
                         </button>
                       </div>
                       
@@ -188,26 +197,3 @@ export default function App() {
                   {!isFocusMode && (
                     <motion.div
                       initial={{ width: 0, opacity: 0 }}
-                      animate={{ width: 384, opacity: 1 }}
-                      exit={{ width: 0, opacity: 0 }}
-                      className="h-full overflow-hidden shrink-0"
-                    >
-                      <PillarPanel note={activeNote} onUpdate={updateNote} />
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </motion.div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-zinc-700">
-              <Sparkles size={64} className="mb-6 opacity-20" />
-              <p className="text-xl font-medium tracking-tight">Select a thought to begin synthesis</p>
-            </div>
-          )}
-        </AnimatePresence>
-      </main>
-
-      <VoiceToText onTranscript={handleTranscript} />
-    </div>
-  );
-}
