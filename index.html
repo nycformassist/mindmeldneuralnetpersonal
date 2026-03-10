@@ -2,12 +2,21 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <!-- Optimized for Samsung Galaxy A17:
+         - maximum-scale=1.0 prevents accidental zoom during mic taps in the field
+         - viewport-fit=cover fills the full display edge-to-edge -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0A0A0B" />
+    <!-- PWA / Add to Home Screen support -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Neural Vault" />
+    <meta name="description" content="Neural Vault — Your personal AI-powered knowledge clone and strategic intelligence system." />
+    <title>Neural Vault</title>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

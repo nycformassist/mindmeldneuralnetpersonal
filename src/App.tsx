@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Editor } from './components/Editor';
 import { PillarPanel } from './components/PillarPanel';
 import { RelationshipGraph } from './components/RelationshipGraph';
 import { VoiceToText } from './components/VoiceToText';
 import { Note } from './types';
-import { detectRelationships } from './services/geminiService';
+import { detectRelationships, suggestPillar } from './services/geminiService';
 import { cn } from './lib/utils';
-import { Loader2, BrainCircuit, Sparkles } from 'lucide-react';
+import { Loader2, BrainCircuit, Sparkles, WifiOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 const STORAGE_KEY = 'neural_vault_notes_v2';
@@ -19,18 +19,47 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isFocusMode, setIsFocusMode] = useState(false);
-  const [transcript, setTranscript] = useState('');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [pillarSuggestion, setPillarSuggestion] = useState<string | null>(null);
 
-  // 1. Initial Load Logic
+  // Queue of note IDs awaiting Gemini analysis (populated while offline)
+  const pendingAnalysisQueue = useRef<Set<string>>(new Set());
+
+  // ─── Online / Offline Detection ───────────────────────────────────────────
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
+
+  // Flush the pending analysis queue when connectivity returns
+  useEffect(() => {
+    if (isOnline && pendingAnalysisQueue.current.size > 0) {
+      const queue = [...pendingAnalysisQueue.current];
+      pendingAnalysisQueue.current.clear();
+      queue.forEach(noteId => {
+        const note = notes.find(n => n.id === noteId);
+        if (note) runAnalysis(note);
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline]);
+
+  // ─── Initial Load ──────────────────────────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        const parsed = JSON.parse(saved);
+        const parsed: Note[] = JSON.parse(saved);
         setNotes(parsed);
         if (parsed.length > 0) setActiveNoteId(parsed[0].id);
       } catch (e) {
-        console.error("Failed to parse saved notes", e);
+        console.error('[NeuralVault] Failed to parse saved notes:', e);
       }
     } else {
       const welcomeNote: Note = {
@@ -40,7 +69,7 @@ export default function App() {
         updatedAt: Date.now(),
         tags: ['genesis', 'framework'],
         pillarType: 'MODERN_MINISTRY',
-        relatedNoteIds: []
+        relatedNoteIds: [],
       };
       setNotes([welcomeNote]);
       setActiveNoteId(welcomeNote.id);
@@ -48,29 +77,32 @@ export default function App() {
     setIsLoaded(true);
   }, []);
 
-  // 2. Persistent Storage Sync
+  // ─── Persistent Storage Sync ───────────────────────────────────────────────
   useEffect(() => {
     if (isLoaded) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
     }
   }, [notes, isLoaded]);
 
-  const activeNote = useMemo(() => 
-    notes.find(n => n.id === activeNoteId) || null
-  , [notes, activeNoteId]);
+  const activeNote = useMemo(
+    () => notes.find(n => n.id === activeNoteId) ?? null,
+    [notes, activeNoteId]
+  );
 
-  // 3. Appending Voice Transcripts
-  // This hook ensures that when VoiceToText emits a transcript, it's injected 
-  // directly into the active note's content without overwriting.
-  useEffect(() => {
-    if (transcript && activeNoteId) {
-      updateNote({
-        content: activeNote?.content + (activeNote?.content ? " " : "") + transcript
-      });
-      // Clear local transcript state to prevent repeat injections
-      setTranscript('');
-    }
-  }, [transcript]);
+  // ─── Note Mutations ────────────────────────────────────────────────────────
+  const updateNote = useCallback(
+    (updates: Partial<Note>) => {
+      if (!activeNoteId) return;
+      setNotes(prev =>
+        prev.map(n =>
+          n.id === activeNoteId
+            ? { ...n, ...updates, updatedAt: Date.now() }
+            : n
+        )
+      );
+    },
+    [activeNoteId]
+  );
 
   const handleNewNote = () => {
     const newNote: Note = {
@@ -79,36 +111,81 @@ export default function App() {
       content: '',
       updatedAt: Date.now(),
       tags: [],
-      relatedNoteIds: []
+      relatedNoteIds: [],
     };
-    setNotes([newNote, ...notes]);
+    setNotes(prev => [newNote, ...prev]);
     setActiveNoteId(newNote.id);
     setIsFocusMode(false);
+    setPillarSuggestion(null);
   };
 
-  const updateNote = (updates: Partial<Note>) => {
-    if (!activeNoteId) return;
-    setNotes(prev => prev.map(n => 
-      n.id === activeNoteId 
-        ? { ...n, ...updates, updatedAt: Date.now() } 
-        : n
-    ));
-  };
+  const handleDeleteNote = useCallback(
+    (id: string) => {
+      setNotes(prev => {
+        const updated = prev.filter(n => n.id !== id);
+        if (activeNoteId === id) {
+          setActiveNoteId(updated.length > 0 ? updated[0].id : null);
+        }
+        return updated;
+      });
+    },
+    [activeNoteId]
+  );
 
-  const handleAnalyze = async () => {
-    if (!activeNote || !activeNote.content) return;
+  // ─── Voice Transcript Injection (Race-Condition-Free) ─────────────────────
+  // FIX: Direct functional update to setNotes — no state intermediary,
+  // no double-injection from the old transcript → useEffect → updateNote chain.
+  const handleTranscript = useCallback(
+    (text: string) => {
+      if (!activeNoteId) return;
+      setNotes(prev =>
+        prev.map(n => {
+          if (n.id !== activeNoteId) return n;
+          const separator = n.content && !n.content.endsWith(' ') ? ' ' : '';
+          return { ...n, content: n.content + separator + text, updatedAt: Date.now() };
+        })
+      );
+    },
+    [activeNoteId]
+  );
+
+  // ─── Pillar Auto-Suggestion ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!activeNote || activeNote.pillarType) {
+      setPillarSuggestion(null);
+      return;
+    }
+    const suggestion = suggestPillar(activeNote.content);
+    setPillarSuggestion(suggestion);
+  }, [activeNote?.content, activeNote?.pillarType]);
+
+  // ─── Gemini Semantic Analysis ──────────────────────────────────────────────
+  const runAnalysis = async (note: Note) => {
     setIsAnalyzing(true);
     try {
-      // Calls the Gemini 3.1 Pro backend to detect semantic links across the vault
-      const relatedIds = await detectRelationships(activeNote, notes);
-      updateNote({ relatedNoteIds: relatedIds });
+      if (!isOnline) {
+        pendingAnalysisQueue.current.add(note.id);
+        console.log('[NeuralVault] Offline — analysis queued.');
+        return;
+      }
+      const relatedIds = await detectRelationships(note, notes);
+      setNotes(prev =>
+        prev.map(n =>
+          n.id === note.id ? { ...n, relatedNoteIds: relatedIds } : n
+        )
+      );
     } catch (error) {
-      console.error("Analysis failed", error);
+      console.error('[NeuralVault] Analysis failed:', error);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
+  const handleAnalyze = () => {
+    if (activeNote?.content) runAnalysis(activeNote);
+  };
+
+  // ─── Loading Screen ────────────────────────────────────────────────────────
   if (!isLoaded) {
     return (
       <div className="h-screen w-screen bg-vault-bg flex items-center justify-center">
@@ -124,6 +201,23 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex overflow-hidden bg-vault-bg font-sans selection:bg-emerald-500/30">
+
+      {/* Offline Banner */}
+      <AnimatePresence>
+        {!isOnline && (
+          <motion.div
+            initial={{ y: -40 }}
+            animate={{ y: 0 }}
+            exit={{ y: -40 }}
+            className="fixed top-0 left-0 right-0 z-50 flex items-center justify-center gap-2 bg-amber-500/90 text-black text-xs font-bold py-2 tracking-wide backdrop-blur-md"
+          >
+            <WifiOff size={13} />
+            Offline — notes saving locally. Semantic analysis queued for when you reconnect.
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sidebar */}
       <AnimatePresence>
         {!isFocusMode && (
           <motion.div
@@ -137,6 +231,7 @@ export default function App() {
               activeNoteId={activeNoteId}
               onNoteSelect={setActiveNoteId}
               onNewNote={handleNewNote}
+              onDeleteNote={handleDeleteNote}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
             />
@@ -144,10 +239,11 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-[#0a0a0a]">
         <AnimatePresence mode="wait">
           {activeNote ? (
-            <motion.div 
+            <motion.div
               key={activeNote.id}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -156,35 +252,74 @@ export default function App() {
             >
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 flex flex-col overflow-hidden">
-                  <Editor 
-                    note={activeNote} 
+                  <Editor
+                    note={activeNote}
                     onUpdate={updateNote}
                     isFocusMode={isFocusMode}
                     onToggleFocus={() => setIsFocusMode(!isFocusMode)}
-                    transcript={transcript}
                   />
-                  
-                  <div className={cn(
-                    "px-8 pb-12 shrink-0 transition-all duration-500",
-                    isFocusMode ? "max-w-3xl mx-auto opacity-40 hover:opacity-100" : "w-full"
-                  )}>
+
+                  {/* Pillar Auto-Suggestion Banner */}
+                  <AnimatePresence>
+                    {pillarSuggestion && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="px-8 py-3 bg-emerald-500/10 border-t border-emerald-500/20 flex items-center gap-3 text-xs shrink-0"
+                      >
+                        <Sparkles size={13} className="text-emerald-400 shrink-0" />
+                        <span className="text-zinc-400">
+                          Suggested Pillar:{' '}
+                          <span className="text-emerald-400 font-bold">
+                            {pillarSuggestion.replace(/_/g, ' ')}
+                          </span>
+                        </span>
+                        <button
+                          onClick={() => updateNote({ pillarType: pillarSuggestion as any })}
+                          className="ml-auto text-emerald-400 hover:text-white font-bold uppercase tracking-wider transition-colors"
+                        >
+                          Apply
+                        </button>
+                        <button
+                          onClick={() => setPillarSuggestion(null)}
+                          className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                        >
+                          Dismiss
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <div
+                    className={cn(
+                      'px-8 pb-12 shrink-0 transition-all duration-500',
+                      isFocusMode ? 'max-w-3xl mx-auto opacity-40 hover:opacity-100' : 'w-full'
+                    )}
+                  >
                     <div className="max-w-4xl mx-auto">
-                      <div className="flex items-center gap-6 mb-6">
+                      <div className="flex items-center gap-4 mb-6 flex-wrap">
                         <button
                           onClick={handleAnalyze}
                           disabled={isAnalyzing || !activeNote.content}
                           className="flex items-center gap-3 px-6 py-3 rounded-[24px] bg-emerald-500 text-[#050505] font-bold text-sm hover:scale-105 active:scale-95 transition-all shadow-xl shadow-emerald-500/20 disabled:opacity-50 group"
                         >
                           {isAnalyzing ? (
-                            <Loader2 size={18} className="animate-spin text-black" />
+                            <Loader2 size={18} className="animate-spin" />
                           ) : (
                             <BrainCircuit size={18} className="group-hover:rotate-12 transition-transform" />
                           )}
                           {isAnalyzing ? 'Mapping Neural Links...' : 'Synthesize Semantic Map'}
                         </button>
+
+                        {!isOnline && (
+                          <span className="text-[10px] text-amber-400/80 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                            <WifiOff size={11} /> Will run when online
+                          </span>
+                        )}
                       </div>
-                      
-                      <RelationshipGraph 
+
+                      <RelationshipGraph
                         currentNote={activeNote}
                         allNotes={notes}
                         onNoteSelect={setActiveNoteId}
@@ -193,7 +328,39 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Pillar Panel */}
                 <AnimatePresence>
                   {!isFocusMode && (
                     <motion.div
                       initial={{ width: 0, opacity: 0 }}
+                      animate={{ width: 384, opacity: 1 }}
+                      exit={{ width: 0, opacity: 0 }}
+                      className="h-full overflow-hidden shrink-0"
+                    >
+                      <PillarPanel note={activeNote} onUpdate={updateNote} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-zinc-700">
+              <Sparkles size={64} className="mb-6 opacity-20" />
+              <p className="text-xl font-medium tracking-tight">
+                Select a thought to begin synthesis
+              </p>
+              <button
+                onClick={handleNewNote}
+                className="mt-6 px-6 py-3 rounded-2xl bg-emerald-500 text-black font-bold text-sm hover:scale-105 active:scale-95 transition-transform"
+              >
+                New Note
+              </button>
+            </div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      <VoiceToText onTranscript={handleTranscript} />
+    </div>
+  );
+}
